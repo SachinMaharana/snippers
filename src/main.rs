@@ -1,9 +1,14 @@
+#[macro_use]
+extern crate diesel;
+
 use actix_web::http::StatusCode;
-use actix_web::{error, middleware, web, App, Error, HttpResponse, HttpServer, Responder};
+use actix_web::{error, middleware, web, App, Error, HttpResponse, HttpServer};
 use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
 use dotenv::dotenv;
 use serde::{Deserialize, Serialize};
+
+type DbPool = r2d2::Pool<ConnectionManager<MysqlConnection>>;
 
 async fn healthz() -> Result<HttpResponse, Error> {
     Ok(HttpResponse::Ok().status(StatusCode::OK).json("ok"))
@@ -15,33 +20,73 @@ async fn home() -> Result<HttpResponse, Error> {
         .body("Hello from Snippers"))
 }
 
+mod actions;
+mod models;
+mod schema;
+
 #[derive(Serialize, Deserialize)]
 struct ShowSnippet {
     id: String,
 }
 
-async fn show_snippet(query: web::Query<ShowSnippet>) -> impl Responder {
+async fn get_snippet(
+    query: web::Query<ShowSnippet>,
+    pool: web::Data<DbPool>,
+) -> Result<HttpResponse, Error> {
     let snippet_id = &query.id;
-    match snippet_id.parse::<u32>().map(|id| id > 1) {
+    match snippet_id.parse::<i32>() {
         Ok(snippet_id) => {
-            if snippet_id {
-                HttpResponse::Ok()
-                    .status(StatusCode::OK)
-                    .body("Display a Snippet")
+            if snippet_id >= 1 {
+                let conn = pool
+                    .get()
+                    .expect("Couldn't get DB connection from MySql Pool");
+                let snippet = web::block(move || actions::find_snippet_by_id(snippet_id, &conn))
+                    .await
+                    .map_err(|e| {
+                        eprintln!("{}", e);
+                        HttpResponse::InternalServerError().finish()
+                    })?;
+                if let Some(user) = snippet {
+                    Ok(HttpResponse::Ok().json(user))
+                } else {
+                    let res = HttpResponse::NotFound()
+                        .body(format!("No snippet found with id: {}", snippet_id));
+                    Ok(res)
+                }
             } else {
-                HttpResponse::from_error(error::ErrorBadRequest("ID is less than 1"))
+                Ok(HttpResponse::from_error(error::ErrorBadRequest(
+                    "ID is less than 1",
+                )))
             }
         }
-        Err(e) => {
-            HttpResponse::from_error(error::ErrorBadRequest(format!("Unable to Parse ID: {}", e)))
-        }
+        Err(e) => Ok(HttpResponse::from_error(error::ErrorBadRequest(format!(
+            "Unable to Parse ID: {}",
+            e
+        )))),
     }
 }
 
-async fn create_snippet() -> Result<HttpResponse, Error> {
-    Ok(HttpResponse::Ok()
-        .status(StatusCode::OK)
-        .body("Create a New Snippet"))
+async fn create_snippet(
+    pool: web::Data<DbPool>,
+    snippet_data: web::Json<models::NewSnippet>,
+) -> Result<HttpResponse, Error> {
+    let conn = pool
+        .get()
+        .expect("Couldn't get DB connection from MySql Pool");
+
+    let snippet = web::block(move || {
+        actions::insert_new_snippet(
+            snippet_data.title.as_str(),
+            snippet_data.content.as_str(),
+            &conn,
+        )
+    })
+    .await
+    .map_err(|e| {
+        eprintln!("{}", e);
+        HttpResponse::InternalServerError().finish()
+    })?;
+    Ok(HttpResponse::Ok().status(StatusCode::OK).json(snippet))
 }
 
 #[actix_rt::main]
@@ -68,7 +113,8 @@ async fn main() -> std::io::Result<()> {
             .wrap(middleware::Logger::default())
             .service(web::resource("/healthz").route(web::get().to(healthz)))
             .service(web::resource("/").route(web::get().to(home)))
-            .service(web::resource("/snippet").route(web::get().to(show_snippet)))
+            .service(web::resource("/snippet").route(web::get().to(get_snippet)))
+            // .service(create_snippet)
             .service(
                 web::resource("/snippet/create")
                     .route(web::post().to(create_snippet))
