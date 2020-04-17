@@ -1,6 +1,3 @@
-#[macro_use]
-extern crate diesel;
-
 use actix_web::http::StatusCode;
 use actix_web::{error, middleware, web, App, Error, HttpResponse, HttpServer, Responder};
 use diesel::prelude::*;
@@ -57,13 +54,17 @@ async fn main() -> std::io::Result<()> {
     dotenv().ok();
 
     let connect_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
-    // let manager = ConnectionManager::<Sql>
+    let manager = ConnectionManager::<MysqlConnection>::new(connect_url);
+    let pool = r2d2::Pool::builder()
+        .build(manager)
+        .expect("Failed to create pool");
 
     let endpoint = "127.0.0.1:8080";
     println!("Server listening on: {}", endpoint);
 
-    HttpServer::new(|| {
+    HttpServer::new(move || {
         App::new()
+            .data(pool.clone())
             .wrap(middleware::Logger::default())
             .service(web::resource("/healthz").route(web::get().to(healthz)))
             .service(web::resource("/").route(web::get().to(home)))
