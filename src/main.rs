@@ -25,44 +25,39 @@ mod models;
 mod schema;
 
 #[derive(Serialize, Deserialize)]
-struct ShowSnippet {
+struct SnippetId {
     id: String,
 }
 
 async fn get_snippet(
-    query: web::Query<ShowSnippet>,
+    query: web::Query<SnippetId>,
     pool: web::Data<DbPool>,
 ) -> Result<HttpResponse, Error> {
     let snippet_id = &query.id;
-    match snippet_id.parse::<i32>() {
-        Ok(snippet_id) => {
-            if snippet_id >= 1 {
-                let conn = pool
-                    .get()
-                    .expect("Couldn't get DB connection from MySql Pool");
-                let snippet = web::block(move || actions::find_snippet_by_id(snippet_id, &conn))
-                    .await
-                    .map_err(|e| {
-                        eprintln!("{}", e);
-                        HttpResponse::InternalServerError().finish()
-                    })?;
-                if let Some(user) = snippet {
-                    Ok(HttpResponse::Ok().json(user))
-                } else {
-                    let res = HttpResponse::NotFound()
-                        .body(format!("No snippet found with id: {}", snippet_id));
-                    Ok(res)
-                }
-            } else {
-                Ok(HttpResponse::from_error(error::ErrorBadRequest(
-                    "ID is less than 1",
-                )))
-            }
+    let valid_id = snippet_id.parse::<i32>().map_err(|e| {
+        eprintln!("{}", e);
+        HttpResponse::from_error(error::ErrorBadRequest(format!("Unable to Parse ID: {}", e)))
+    })?;
+    if valid_id < 1 {
+        Ok(HttpResponse::from_error(error::ErrorBadRequest(
+            "ID is less than 1",
+        )))
+    } else {
+        let conn = pool
+            .get()
+            .expect("Couldn't get DB connection from MySql Pool");
+
+        let snippet = web::block(move || actions::find_snippet_by_id(valid_id, &conn))
+            .await
+            .map_err(|e| {
+                eprintln!("{}", e);
+                HttpResponse::InternalServerError().finish()
+            })?;
+        if let Some(snippet) = snippet {
+            Ok(HttpResponse::Ok().json(snippet))
+        } else {
+            Ok(HttpResponse::NotFound().body(format!("No snippet found with id: {}", snippet_id)))
         }
-        Err(e) => Ok(HttpResponse::from_error(error::ErrorBadRequest(format!(
-            "Unable to Parse ID: {}",
-            e
-        )))),
     }
 }
 
